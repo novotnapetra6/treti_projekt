@@ -2,73 +2,106 @@ import requests
 from bs4 import BeautifulSoup
 import csv
 import sys
+from urllib.parse import urljoin
 
-# 1. Funkce pro ověření vstupních argumentů
-def validate_arguments(args):
-    if len(args) != 3:
-        print("Zadejte prosím dva argumenty: URL a název výstupního souboru.")
-        sys.exit(1)
 
-# 2. Funkce pro načtení HTML obsahu stránky
-def fetch_html(url):
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.text
-    except Exception as e:
-        print(f"Chyba při načítání URL: {e}")
-        sys.exit(1)
+def get_soup(url):
+    response = requests.get(url)
+    response.raise_for_status()
+    return BeautifulSoup(response.text, 'html.parser')
 
-# 3. Funkce pro zpracování jednoho řádku s výsledky jedné obce
-def parse_municipality_row(row):
-    cols = row.find_all('td')
-    if len(cols) > 1:
-        municipality_code = cols[0].text.strip()
-        municipality_name = cols[1].text.strip()
-        voters_listed = cols[2].text.strip()
-        ballots_issued = cols[3].text.strip()
-        valid_votes = cols[4].text.strip()
-        parties = [party.text.strip() for party in cols[5:]]
-        return [municipality_code, municipality_name, voters_listed, ballots_issued, valid_votes] + parties
-    return None
 
-# 4. Funkce pro zpracování celé tabulky s výsledky
-def parse_election_data(html):
-    soup = BeautifulSoup(html, 'html.parser')
-    rows = soup.find_all('tr')
-    
-    election_results = []
-    for row in rows[1:]:  # přeskočení hlavičky
-        parsed = parse_municipality_row(row)
-        if parsed:
-            election_results.append(parsed)
-    
-    return election_results
+def get_obec_links(base_url, soup):
+    links = []
+    for row in soup.select('table tr')[2:]:
+        cells = row.find_all('td')
+        if len(cells) >= 1:
+            link = cells[0].find('a')
+            name = cells[1].text.strip()
+            if link:
+                href = link['href']
+                full_url = urljoin(base_url, href)
+                code = link.text.strip()
+                links.append((code, name, full_url))
+    return links
 
-# 5. Funkce pro zápis výsledků do CSV
-def write_to_csv(filename, data):
-    with open(filename, mode='w', newline='', encoding='utf-8') as file:
-        writer = csv.writer(file)
-        writer.writerow(['Kód obce', 'Název obce', 'Voliči v seznamu', 'Vydané obálky', 'Platné hlasy', 'Kandidující strany...'])
-        writer.writerows(data)
 
-# 6. Hlavní funkce, která spouští celý proces
+def get_obec_data(code, name, url):
+    soup = get_soup(url)
+
+    # Informace o voličích a hlasech
+    tables = soup.find_all('table')
+    t1 = tables[0].find_all('td')
+    voters_in_list = t1[3].text.replace('\xa0', '')
+    envelopes_given = t1[4].text.replace('\xa0', '')
+    valid_votes = t1[7].text.replace('\xa0', '')
+
+    # Hlasy pro strany
+    parties_data = {}
+    for table in tables[1:]:
+        rows = table.find_all('tr')[2:]
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 2:
+                party = cols[1].text.strip()
+                votes = cols[2].text.strip().replace('\xa0', '')
+                parties_data[party] = votes
+
+    return {
+        'kod_obce': code,
+        'obec': name,
+        'voliči_v_seznamu': voters_in_list,
+        'vydané_obálky': envelopes_given,
+        'platné_hlasy': valid_votes,
+        'strany': parties_data
+    }
+
+
 def main():
-    validate_arguments(sys.argv)
+    if len(sys.argv) != 3:
+        print("Chyba: Zadejte 2 argumenty – URL územního celku a název výstupního CSV souboru.")
+        sys.exit(1)
 
-    url = sys.argv[1]
-    output_filename = sys.argv[2]
+    main_url = sys.argv[1]
+    output_file = sys.argv[2]
 
-    print(f"Stahuji data z: {url}")
-    html = fetch_html(url)
-    
-    print("Zpracovávám výsledky voleb...")
-    results = parse_election_data(html)
+    if "volby.cz/pls/ps2017nss/ps32" not in main_url:
+        print("Chyba: Zadaná URL není platná volební stránka.")
+        sys.exit(1)
 
-    print(f"Ukládám výsledky do souboru: {output_filename}")
-    write_to_csv(output_filename, results)
+    print(f"Načítám seznam obcí z: {main_url}")
+    soup = get_soup(main_url)
+    obce_links = get_obec_links(main_url, soup)
 
-    print("Hotovo! 🎉 Výsledky byly úspěšně uloženy.")
+    all_results = []
+    all_parties = set()
 
-if __name__ == '__main__':
+    for code, name, url in obce_links:
+        print(f"Zpracovávám obec: {name} ({code})")
+        data = get_obec_data(code, name, url)
+        all_parties.update(data['strany'].keys())
+        all_results.append(data)
+
+    sorted_parties = sorted(all_parties)
+
+    # Zápis do CSV
+    with open(output_file, mode='w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        header = ['Kód obce', 'Název obce', 'Voliči v seznamu', 'Vydané obálky', 'Platné hlasy'] + sorted_parties
+        writer.writerow(header)
+
+        for row in all_results:
+            strany_votes = [row['strany'].get(party, '0') for party in sorted_parties]
+            writer.writerow([
+                row['kod_obce'],
+                row['obec'],
+                row['voliči_v_seznamu'],
+                row['vydané_obálky'],
+                row['platné_hlasy']
+            ] + strany_votes)
+
+    print(f"Hotovo! Výsledky uloženy do souboru {output_file}")
+
+
+if __name__ == "__main__":
     main()
