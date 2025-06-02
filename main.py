@@ -6,7 +6,7 @@ import sys
 # 1. Funkce pro ověření vstupních argumentů
 def validate_arguments(args):
     if len(args) != 3:
-        print("Chyba: Musíte zadat dva argumenty (URL a název výstupního souboru).")
+        print("Zadejte prosím dva argumenty: URL a název výstupního souboru.")
         sys.exit(1)
 
 # 2. Funkce pro načtení HTML obsahu stránky
